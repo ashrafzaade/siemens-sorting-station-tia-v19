@@ -1,0 +1,166 @@
+﻿FUNCTION_BLOCK "FB_Station"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+   VAR_INPUT 
+      PB_Start : Bool;   // Start pushbutton, NO
+      PB_Stop : Bool;   // Stop pushbutton, NC, 0 = pressed
+      PB_Reset : Bool;   // Alarm reset pushbutton
+      ESTOP_OK : Bool;   // Emergency stop circuit, 1 = healthy
+      S_Entry : Bool;   // Part entry sensor
+      S_Defective : Bool;   // Defective part signal
+      Motor_Overload_OK : Bool;   // Overload relay, 1 = healthy
+      Clock1Hz : Bool;   // 1 Hz clock bit for blinking
+   END_VAR
+
+   VAR_OUTPUT 
+      K_Motor : Bool;   // Conveyor motor contactor
+      L_Run : Bool;   // Green lamp
+      L_Fault : Bool;   // Red lamp, blinking
+      L_Idle : Bool;   // Yellow lamp
+      Y_Diverter : Bool;   // Diverter for rejected parts
+      Horn : Bool;   // Alarm horn
+   END_VAR
+
+   VAR_IN_OUT 
+      Station : "udt_Station";   // Station data, passed from DB_Station
+   END_VAR
+
+   VAR 
+      motor { S7_SetPoint := 'False'} : "FB_Motor";   // Motor control instance
+      tonJam {InstructionName := 'TON_TIME'; LibVersion := '1.0'} : TON_TIME;   // Jam detection timer
+      tpDiverter {InstructionName := 'TP_TIME'; LibVersion := '1.0'} : TP_TIME;   // Diverter pulse timer
+   END_VAR
+   VAR RETAIN
+      ctuGood {InstructionName := 'CTU_DINT'; LibVersion := '1.0'} : CTU_DINT;   // Good parts counter
+      ctuReject {InstructionName := 'CTU_DINT'; LibVersion := '1.0'} : CTU_DINT;   // Rejected parts counter
+   END_VAR
+   VAR 
+      rtStart {InstructionName := 'R_TRIG'; LibVersion := '1.0'} : R_TRIG;   // Start edge
+      rtReset {InstructionName := 'R_TRIG'; LibVersion := '1.0'} : R_TRIG;   // Reset edge
+      rtEntry {InstructionName := 'R_TRIG'; LibVersion := '1.0'} : R_TRIG;   // Entry sensor edge
+   END_VAR
+
+   VAR_TEMP 
+      stopCmd : Bool;
+      anyFault : Bool;
+      fEStop : Bool;
+      fOverload : Bool;
+      fOverTemp : Bool;
+      fJam : Bool;
+      goodPulse : Bool;
+      rejectPulse : Bool;
+   END_VAR
+
+
+BEGIN
+	// =====================================================
+	// FB_Station : sorting station main logic
+	// States: 0 = Idle, 1 = Running, 2 = Fault
+	// FaultCode: bit0 EStop, bit1 Overload, bit2 OverTemp, bit3 Jam
+	// =====================================================
+	
+	// ---- 1. Edge detection and commands ----
+	#rtStart(CLK := #PB_Start OR #Station.HMI_Start);
+	#rtReset(CLK := #PB_Reset OR #Station.HMI_Reset);
+	#rtEntry(CLK := #S_Entry);
+	
+	// PB_Stop is NC: 0 = pressed
+	#stopCmd := (NOT #PB_Stop) OR #Station.HMI_Stop;
+	
+	// ---- 2. Fault detection (live conditions) ----
+	#fEStop := NOT #ESTOP_OK;
+	#fOverload := NOT #Motor_Overload_OK;
+	#fOverTemp := #Station.MotorTemp > #Station.TempLimit;
+	
+	// Jam: entry sensor active longer than 5 s while running
+	#tonJam(IN := #S_Entry AND (#Station.State = 1),
+	        PT := T#5s);
+	#fJam := #tonJam.Q;
+	
+	#anyFault := #fEStop OR #fOverload OR #fOverTemp OR #fJam;
+	
+	// ---- 3. Latched fault code ----
+	// Reset clears the code first, then active faults set their bits again
+	IF #rtReset.Q THEN
+	    #Station.FaultCode := W#16#0000;
+	END_IF;
+	
+	IF #fEStop THEN
+	    #Station.FaultCode := #Station.FaultCode OR W#16#0001;
+	END_IF;
+	IF #fOverload THEN
+	    #Station.FaultCode := #Station.FaultCode OR W#16#0002;
+	END_IF;
+	IF #fOverTemp THEN
+	    #Station.FaultCode := #Station.FaultCode OR W#16#0004;
+	END_IF;
+	IF #fJam THEN
+	    #Station.FaultCode := #Station.FaultCode OR W#16#0008;
+	END_IF;
+	
+	// ---- 4. State machine ----
+	CASE #Station.State OF
+	    0:  // Idle
+	        IF #anyFault THEN
+	            #Station.State := 2;
+	        ELSIF #rtStart.Q AND NOT #stopCmd THEN
+	            #Station.State := 1;
+	        END_IF;
+	        
+	    1:  // Running
+	        IF #anyFault THEN
+	            #Station.State := 2;
+	        ELSIF #stopCmd THEN
+	            #Station.State := 0;
+	        END_IF;
+	        
+	    2:  // Fault: leave only on reset with all faults cleared
+	        IF #rtReset.Q AND NOT #anyFault THEN
+	            #Station.State := 0;
+	        END_IF;
+	        
+	    ELSE
+	        #Station.State := 2;
+	END_CASE;
+	
+	// ---- 5. Sorting logic (only while running) ----
+	#goodPulse := FALSE;
+	#rejectPulse := FALSE;
+	
+	IF (#Station.State = 1) AND #rtEntry.Q THEN
+	    IF #S_Defective THEN
+	        #rejectPulse := TRUE;
+	    ELSE
+	        #goodPulse := TRUE;
+	    END_IF;
+	END_IF;
+	
+	#ctuGood(CU := #goodPulse,
+	         R := #Station.HMI_ResetCnt,
+	         PV := 99999999);
+	#ctuReject(CU := #rejectPulse,
+	           R := #Station.HMI_ResetCnt,
+	           PV := 99999999);
+	#Station.CntGood := #ctuGood.CV;
+	#Station.CntReject := #ctuReject.CV;
+	
+	// Diverter: 2 s pulse for each rejected part
+	#tpDiverter(IN := #rejectPulse,
+	            PT := T#2s);
+	#Y_Diverter := #tpDiverter.Q AND (#Station.State = 1);
+	
+	// ---- 6. Motor control ----
+	// Permissive drops the motor in Idle and Fault
+	#motor(Start := #PB_Start OR #Station.HMI_Start,
+	       Stop := #stopCmd,
+	       Permissive := (#Station.State = 1));
+	#K_Motor := #motor.Run;
+	
+	// ---- 7. Lamps and horn ----
+	#L_Idle := (#Station.State = 0);
+	#L_Run := (#Station.State = 1);
+	#L_Fault := (#Station.State = 2) AND #Clock1Hz;
+	#Horn := (#Station.State = 2);
+	
+END_FUNCTION_BLOCK
+

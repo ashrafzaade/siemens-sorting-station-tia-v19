@@ -1,0 +1,19 @@
+﻿ORGANIZATION_BLOCK "Startup"
+TITLE = "Complete Restart"
+{ S7_Optimized_Access := 'TRUE' }
+VERSION : 0.1
+
+BEGIN
+	// =====================================================
+	// OB100 Startup : runs once at every STOP to RUN transition
+	// Puts the station in a known safe state
+	// =====================================================
+	"DB_Station".State := 0;
+	"DB_Station".FaultCode := W#16#0000;
+	
+	"DB_Station".HMI_Start := FALSE;
+	"DB_Station".HMI_Stop := FALSE;
+	"DB_Station".HMI_Reset := FALSE;
+	"DB_Station".HMI_ResetCnt := FALSE;
+END_ORGANIZATION_BLOCK
+

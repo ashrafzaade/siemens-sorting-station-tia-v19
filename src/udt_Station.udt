@@ -1,0 +1,17 @@
+﻿TYPE "udt_Station"
+VERSION : 0.1
+   STRUCT
+      State : Int;   // 0=Idle, 1=Running, 2=Fault
+      FaultCode : Word := 0;   // bit0=EStop, bit1=Overload, bit2=OverTemp, bit3=Jam
+      CntGood : DInt := 0;   // Count of good parts
+      CntReject : DInt;   // Count of rejected parts
+      MotorTemp : Real;   // Scaled motor temperature in degC
+      TempLimit : Real := 80.0;   // Max allowed motor temperature in degC
+      HMI_Start : Bool;   // Start command from HMI
+      HMI_Stop : Bool;   // Stop command from HMI
+      HMI_Reset : Bool;   // Alarm reset command from HMI
+      HMI_ResetCnt : Bool;   // Counter reset command from HMI
+   END_STRUCT;
+
+END_TYPE
+
